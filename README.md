@@ -10,12 +10,14 @@
         │  REST / Webhook（X-API-Key 驗證）
         ▼
   app/main.py  FastAPI 服務層 ── 稽核紀錄 (audit_log)
-   ├─ /chat            → app/rag.py    切塊 → 向量化(Chroma) → 檢索 → 帶引用回答
+   ├─ /chat            → app/rag.py    增量索引 → 向量搜尋 → rerank → 帶引用回答
    ├─ /agent           → app/agent.py  工具迴圈 → app/tools.py (知識庫 / 訂單DB / 建工單)
    ├─ /webhook/triage  → 結構化輸出：分類、優先級、回覆草稿、是否需人工
    └─ /chat/stream     → 串流輸出
         │
   app/llm.py   OpenAI 相容 LLM 封裝（預設本機 Ollama、串流、結構化輸出）
+  app/tasks.py Celery webhook worker（Redis broker）
+  web/         串流聊天與工單核准頁面
 ```
 
 ## 快速開始
@@ -32,6 +34,22 @@ pytest                          # 離線測試（不需 API key）
 ```
 
 預設 LLM 使用 Ollama 的 `qwen3.5:4b`，在本機執行，不需要付費 API key。RAG 的多語嵌入模型會在首次建立索引時下載。如需改用其他 OpenAI 相容服務，設定 `LLM_BASE_URL`、`LLM_API_KEY` 與 `LLM_MODEL` 即可。
+
+啟動服務後到 `http://localhost:8000/ui` 使用串流聊天與工單核准介面。`/chat` 與 `/agent` 支援 `session_id`，相同 session 的訊息會存入資料庫並帶入後續請求。RAG 的 `/ingest` 是增量更新：檔案未變時跳過重算，變更時更新 chunks，來源檔移除後會清掉對應索引。可用 `metadata_filter` 過濾 `source` 等欄位，也可用 `DELETE /knowledge?source=return_policy.md` 刪除來源。
+
+### PostgreSQL、pgvector 與 webhook worker
+
+本機快速試用預設仍採 SQLite + Chroma。設定 PostgreSQL DSN 後，向量索引會自動使用 pgvector；完整服務可用 Docker Compose 啟動 PostgreSQL/pgvector、Redis、API 與 Celery worker。Compose 會連到主機上運行的 Ollama：
+
+```bash
+docker compose up --build
+```
+
+第一次建立 pgvector 索引需要下載嵌入模型。`POST /webhook/triage` 會回傳 `job_id`，用 `GET /webhook/jobs/{job_id}` 查處理狀態。人工寫入核准流程為 `pending → approved → executed`：`POST /approvals/{id}/approve` 核准後，再呼叫 `/execute` 建立工單。
+
+Agent 需要建立工單時只會建立待核准項目，不會立即寫入。用 `GET /approvals?state=pending` 查看，再用 `POST /approvals/{id}/approve` 核准、`POST /approvals/{id}/execute` 建立工單。每個 API request 都帶 `X-API-Key`。
+
+RAG 黃金題集位於 `data/golden_questions.json`。執行 `python scripts/eval_rag.py` 會輸出檢索命中率與關鍵詞答案正確率；可加 `--output data/eval-result.json` 儲存明細。
 
 ```bash
 curl -X POST localhost:8000/ingest -H "X-API-Key: change-me" -H "Content-Type: application/json" -d '{"directory":"docs"}'
@@ -65,13 +83,13 @@ curl -X POST localhost:8000/webhook/triage -H "X-API-Key: change-me" -H "Content
 
 ## 延伸待辦（建議依序做，也是作品集亮點）
 
-- [ ] 對話記憶：把 `history` 存 DB，依 session 帶入
-- [ ] 寫入工具加人工核准狀態機（pending → approved → executed）
-- [ ] RAG：加入 reranker、metadata 過濾、增量更新與刪除
-- [ ] 評估腳本 `scripts/eval_rag.py`：跑黃金題集，算命中率與答案正確率
-- [ ] 非同步佇列（Celery / RQ）處理 webhook，避免逾時
-- [ ] 將 SQLite 換成 PostgreSQL、Chroma 換成 pgvector
-- [ ] 前端：簡單聊天頁（串流）與工單審核頁
+- [x] 對話記憶：把 `history` 存 DB，依 session 帶入
+- [x] 寫入工具加人工核准狀態機（pending → approved → executed）
+- [x] RAG：加入 reranker、metadata 過濾、增量更新與刪除
+- [x] 評估腳本 `scripts/eval_rag.py`：跑黃金題集，算命中率與答案正確率
+- [x] 非同步佇列（Celery / Redis）處理 webhook，避免逾時
+- [x] 增加 PostgreSQL + pgvector 後端，保留 SQLite + Chroma 本機模式
+- [x] 前端：簡單聊天頁（串流）與工單審核頁
 
 ## 履歷可寫的成果句型
 

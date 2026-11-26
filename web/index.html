@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>客服知識助理</title>
+  <style>
+    :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #17212b; background: #f3f6f8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { padding: 16px max(20px, calc((100vw - 1100px)/2)); background: #123047; color: white; }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    main { max-width: 1100px; margin: 24px auto; padding: 0 20px; display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr); gap: 20px; }
+    section { background: white; border: 1px solid #dce4ea; border-radius: 12px; padding: 18px; box-shadow: 0 4px 18px #102b3b0b; }
+    h2 { margin: 0 0 14px; font-size: 1.05rem; }
+    label { display: block; font-size: .85rem; color: #526371; margin: 8px 0 4px; }
+    input, textarea, button { font: inherit; }
+    input, textarea { width: 100%; border: 1px solid #c7d2db; border-radius: 8px; padding: 9px 11px; }
+    textarea { min-height: 90px; resize: vertical; }
+    button { border: 0; background: #087e8b; color: white; border-radius: 8px; padding: 9px 13px; cursor: pointer; }
+    button.secondary { background: #496578; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .row { display: flex; gap: 8px; align-items: end; }
+    .row > div { flex: 1; }
+    #messages { height: 390px; overflow: auto; border: 1px solid #e3e9ed; border-radius: 8px; padding: 12px; margin: 12px 0; background: #fafcfd; white-space: pre-wrap; }
+    .bubble { margin: 0 0 12px; }
+    .bubble strong { display: block; font-size: .8rem; color: #526371; }
+    .sources { color: #526371; font-size: .8rem; margin-top: 5px; }
+    .approval { border-top: 1px solid #e4eaee; padding: 12px 0; }
+    .approval:first-child { border-top: 0; }
+    .approval p { margin: 4px 0 9px; white-space: pre-wrap; }
+    .actions { display: flex; gap: 8px; }
+    #status { min-height: 1.3em; color: #526371; font-size: .85rem; }
+    @media (max-width: 760px) { main { grid-template-columns: 1fr; margin: 14px auto; } #messages { height: 300px; } }
+  </style>
+</head>
+<body>
+  <header><h1>客服知識助理</h1></header>
+  <main>
+    <section>
+      <h2>客服對話</h2>
+      <div class="row">
+        <div><label for="apiKey">API Key</label><input id="apiKey" type="password" value="change-me" autocomplete="off"></div>
+        <div><label for="sessionId">Session ID（續接對話可保留）</label><input id="sessionId" placeholder="自動建立"></div>
+      </div>
+      <div id="messages" aria-live="polite"></div>
+      <form id="chatForm">
+        <label for="mode">回答模式</label>
+        <select id="mode" style="width:100%;border:1px solid #c7d2db;border-radius:8px;padding:9px 11px;background:white">
+          <option value="rag">知識庫問答（政策、FAQ）</option>
+          <option value="agent">客服 Agent（訂單查詢、知識庫、工單）</option>
+        </select>
+        <label for="question">問題</label>
+        <div class="row"><div><textarea id="question" required maxlength="2000" placeholder="例如：拆封後可以退貨嗎？"></textarea></div><button id="send">送出</button></div>
+      </form>
+      <div id="status"></div>
+    </section>
+    <section>
+      <div class="row"><div><h2>工單核准</h2></div><button id="refresh" class="secondary">重新整理</button></div>
+      <div id="approvals">載入中…</div>
+    </section>
+  </main>
+  <script>
+    const apiKey = document.querySelector('#apiKey');
+    const sessionId = document.querySelector('#sessionId');
+    const messages = document.querySelector('#messages');
+    const status = document.querySelector('#status');
+    const mode = document.querySelector('#mode');
+    apiKey.value = localStorage.getItem('ai-demo-api-key') || apiKey.value;
+    sessionId.value = localStorage.getItem('ai-demo-session-id') || '';
+    mode.value = localStorage.getItem('ai-demo-mode') || 'rag';
+    apiKey.addEventListener('change', () => localStorage.setItem('ai-demo-api-key', apiKey.value));
+    mode.addEventListener('change', () => localStorage.setItem('ai-demo-mode', mode.value));
+    function addBubble(role, content, sources = []) {
+      const item = document.createElement('div'); item.className = 'bubble';
+      const title = document.createElement('strong'); title.textContent = role;
+      const body = document.createElement('div'); body.textContent = content;
+      item.append(title, body);
+      if (sources.length) { const src = document.createElement('div'); src.className = 'sources'; src.textContent = '來源：' + sources.map(x => x.source).join('、'); item.append(src); }
+      messages.append(item); messages.scrollTop = messages.scrollHeight;
+    }
+    async function request(path, options = {}) {
+      const response = await fetch(path, { ...options, headers: { 'X-API-Key': apiKey.value, 'Content-Type': 'application/json', ...(options.headers || {}) } });
+      if (!response.ok) throw new Error(await response.text());
+      return response;
+    }
+    document.querySelector('#chatForm').addEventListener('submit', async event => {
+      event.preventDefault();
+      const question = document.querySelector('#question'); const button = document.querySelector('#send');
+      const text = question.value.trim(); if (!text) return;
+      addBubble('你', text); question.value = ''; button.disabled = true; status.textContent = '正在查詢…';
+      try {
+        const body = { question: text, session_id: sessionId.value || null };
+        if (mode.value === 'agent') {
+          const response = await request('/agent', { method: 'POST', body: JSON.stringify(body) });
+          const result = await response.json();
+          sessionId.value = result.session_id;
+          addBubble('客服 Agent', result.answer);
+        } else {
+          const response = await request('/chat/stream', { method: 'POST', body: JSON.stringify(body) });
+          sessionId.value = response.headers.get('X-Session-ID') || sessionId.value;
+          const item = document.createElement('div'); item.className = 'bubble';
+          const title = document.createElement('strong'); title.textContent = '知識庫助理';
+          const answer = document.createElement('div'); item.append(title, answer); messages.append(item);
+          const reader = response.body.getReader(); const decoder = new TextDecoder();
+          while (true) { const { value, done } = await reader.read(); if (done) break; answer.textContent += decoder.decode(value, { stream: true }); messages.scrollTop = messages.scrollHeight; }
+        }
+        localStorage.setItem('ai-demo-session-id', sessionId.value);
+        status.textContent = '完成。Session：' + sessionId.value;
+      } catch (error) { status.textContent = '錯誤：' + error.message; }
+      finally { button.disabled = false; }
+    });
+    async function loadApprovals() {
+      const container = document.querySelector('#approvals'); container.textContent = '載入中…';
+      try {
+        const response = await request('/approvals'); const data = await response.json(); container.replaceChildren();
+        if (!data.items.length) { container.textContent = '目前沒有待核准或已建立的寫入動作。'; return; }
+        for (const item of data.items) {
+          const card = document.createElement('div'); card.className = 'approval';
+          const title = document.createElement('strong'); title.textContent = `#${item.id} · ${item.tool_name} · ${item.state}`;
+          const detail = document.createElement('p'); detail.textContent = JSON.stringify(item.arguments, null, 2);
+          card.append(title, detail);
+          const actions = document.createElement('div'); actions.className = 'actions';
+          if (item.state === 'pending') {
+            const approve = document.createElement('button'); approve.textContent = '核准';
+            approve.onclick = async () => { await request(`/approvals/${item.id}/approve`, { method: 'POST' }); await loadApprovals(); };
+            actions.append(approve);
+          }
+          if (item.state === 'approved') {
+            const execute = document.createElement('button'); execute.textContent = '執行並建立工單';
+            execute.onclick = async () => { await request(`/approvals/${item.id}/execute`, { method: 'POST' }); await loadApprovals(); };
+            actions.append(execute);
+          }
+          if (actions.childElementCount) card.append(actions);
+          container.append(card);
+        }
+      } catch (error) { container.textContent = '讀取失敗：' + error.message; }
+    }
+    document.querySelector('#refresh').addEventListener('click', loadApprovals);
+    loadApprovals();
+  </script>
+</body>
+</html>

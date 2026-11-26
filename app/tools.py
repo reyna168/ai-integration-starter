@@ -1,6 +1,4 @@
 """Agent 可用的工具。原則：讀取類自由使用；寫入類最小權限 + 稽核 + 必要時人工核准。"""
-import time
-
 from . import db
 
 TOOLS = [
@@ -33,17 +31,16 @@ def search_knowledge_base(query: str) -> dict:
 
 
 def get_order_status(order_id: str) -> dict:
-    with db.conn() as c:  # 一律使用參數化查詢，避免 SQL injection
-        row = c.execute("SELECT order_id,status,eta,amount FROM orders WHERE order_id=?",
-                        (order_id.strip().upper(),)).fetchone()
-    return dict(row) if row else {"error": f"找不到訂單 {order_id}"}
+    row = db.get_order_status(order_id)
+    return row if row else {"error": f"找不到訂單 {order_id}"}
 
 
 def create_support_ticket(title: str, description: str, priority: str) -> dict:
-    with db.conn() as c:
-        cur = c.execute("INSERT INTO tickets(title,description,priority,created_at) VALUES (?,?,?,?)",
-                        (title, description, priority, time.time()))
-    return {"ticket_id": cur.lastrowid, "state": "open", "note": "已轉交人工客服"}
+    approval_id = db.create_approval("create_support_ticket", {
+        "title": title, "description": description, "priority": priority,
+    })
+    return {"approval_id": approval_id, "state": "pending",
+            "note": "寫入動作已送交人工核准；核准並執行後才會建立工單"}
 
 
 REGISTRY = {f.__name__: f for f in (search_knowledge_base, get_order_status, create_support_ticket)}

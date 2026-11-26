@@ -84,9 +84,10 @@ def chat(prompt: str, system: str = "", history: list[dict] | None = None,
     return result["content"]
 
 
-def stream(prompt: str, system: str = "", max_tokens: int = 1024) -> Iterator[str]:
+def stream(prompt: str, system: str = "", max_tokens: int = 1024,
+           history: list[dict] | None = None) -> Iterator[str]:
     """Stream generated text for chat UIs."""
-    messages = _messages(prompt, system)
+    messages = _messages(prompt, system, history)
     if uses_ollama():
         import httpx
         payload = {"model": settings.model, "messages": messages, "stream": True,
