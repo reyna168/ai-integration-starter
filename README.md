@@ -20,6 +20,93 @@
   web/         串流聊天與工單核准頁面
 ```
 
+### 運行時架構（目前實作）
+
+```mermaid
+flowchart TB
+  subgraph clients["入口 / 信任邊界"]
+    UI["web/index.html<br/>串流聊天 + 工單核准頁"]
+    ENT["Helpdesk / Email / Slack / ERP"]
+  end
+
+  subgraph api["FastAPI 服務層 — app/main.py"]
+    GW["require_key()<br/>X-API-Key 驗證"]
+    RAGAPI["/chat · /chat/stream<br/>/ingest · DELETE /knowledge"]
+    AGAPI["/agent · /sessions/{id}/messages"]
+    APR["/approvals · /approve · /execute"]
+    WH["/webhook/triage · /webhook/jobs/{id}"]
+    TRIAGE["triage_payload()<br/>結構化分類 + 回覆草稿"]
+  end
+
+  subgraph core["AI 核心層"]
+    RAG["app/rag.py<br/>切塊 / 嵌入 / 檢索 / rerank"]
+    AGENT["app/agent.py<br/>工具迴圈 max_steps=6"]
+    TOOLS["app/tools.py<br/>唯讀工具 + 寫入工具"]
+    LLM["app/llm.py<br/>chat / stream / structured / tool calls"]
+  end
+
+  subgraph queue["非同步處理"]
+    REDIS[("Redis<br/>broker + result backend")]
+    WORKER["app/tasks.py<br/>Celery worker"]
+  end
+
+  subgraph stores["持久化與知識來源"]
+    DB[("SQLite / PostgreSQL<br/>app/db.py")]
+    VEC[("Chroma / pgvector<br/>kb_chunks")]
+    DOCS[("docs/ *.md .txt .pdf")]
+  end
+
+  LLMEXT["Ollama qwen3.5:4b<br/>或 OpenAI 相容端點"]
+
+  ENT -->|REST / Webhook| GW
+  UI -->|HTTP| GW
+  GW --> RAGAPI & AGAPI & APR & WH
+  GW -.->|audit_log / session 歷史| DB
+
+  RAGAPI --> RAG
+  RAGAPI -->|"/chat/stream 直接使用 llm.stream"| LLM
+  AGAPI --> AGENT
+  AGENT --> LLM
+  AGENT --> TOOLS
+  TOOLS -->|search_knowledge_base| RAG
+  TOOLS -->|get_order_status| DB
+  TOOLS -->|"create_support_ticket → pending"| DB
+  APR -->|"approve → execute → tickets"| DB
+  RAG --> LLM
+  RAG --> VEC
+  DOCS -->|ingest_dir 增量索引| RAG
+
+  WH -->|process_triage.delay| REDIS
+  REDIS --> WORKER
+  WORKER --> TRIAGE
+  TRIAGE --> LLM
+  TRIAGE -->|audit_log| DB
+  LLM --> LLMEXT
+```
+
+### 部署拓撲（docker-compose.yml）
+
+```mermaid
+flowchart LR
+  CLIENT["企業系統 / 瀏覽器"] --> API
+  EXT["Host 上的 Ollama<br/>:11434"] -->|host.docker.internal| API
+  EXT -->|host.docker.internal| W
+
+  subgraph compose["docker compose"]
+    API["api :8000"]
+    W["worker (Celery)"]
+    PG[("postgres/pgvector<br/>:5432")]
+    RD[("redis :6379")]
+    VOL[("postgres_data<br/>model_cache")]
+  end
+
+  API --> PG
+  API --> RD
+  W --> PG
+  W --> RD
+  PG --- VOL
+```
+
 ## 快速開始
 
 ```bash
@@ -60,16 +147,16 @@ curl -X POST localhost:8000/webhook/triage -H "X-API-Key: change-me" -H "Content
 
 ## 八週學習與實作規劃
 
-| 週 | 主題 | 實作（對應本專案檔案） | 完成標準 |
-|---|---|---|---|
-| 1 | LLM API 基礎 | `llm.py`：chat、串流、重試、token/延遲日誌 | 能解釋 temperature、max_tokens、system prompt 差異 |
-| 2 | Prompt 與結構化輸出 | `extract_structured`、`/webhook/triage` | 100 筆樣本輸出 schema 合格率 > 98% |
-| 3 | RAG 基礎 | `rag.py` 切塊、嵌入、檢索 | 能回答自己文件的問題並附來源 |
-| 4 | RAG 品質 | 調 chunk 大小、`max_distance`、加 rerank / hybrid search；建 20 題黃金測試集 | 有「找不到就說不知道」的行為，並有量化指標 |
-| 5 | Agent 與工具 | `agent.py`、`tools.py` | 能多步驟完成「查訂單 + 查政策」 |
-| 6 | 安全與治理 | 參數化 SQL、寫入工具核准流程、prompt injection 測試、稽核 | 惡意文件內容無法讓 Agent 越權 |
-| 7 | 企業整合 | 串真實系統：Slack / Teams / Zendesk / Jira / Email；SSO；佇列處理 | 一條真實流程端到端自動化 |
-| 8 | 部署與維運 | Docker、CI、監控、成本告警、快取 | 有儀表板看延遲、成本、失敗率 |
+| 週  | 主題                | 實作（對應本專案檔案）                                                       | 完成標準                                           |
+| --- | ------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------- |
+| 1   | LLM API 基礎        | `llm.py`：chat、串流、重試、token/延遲日誌                                   | 能解釋 temperature、max_tokens、system prompt 差異 |
+| 2   | Prompt 與結構化輸出 | `extract_structured`、`/webhook/triage`                                      | 100 筆樣本輸出 schema 合格率 > 98%                 |
+| 3   | RAG 基礎            | `rag.py` 切塊、嵌入、檢索                                                    | 能回答自己文件的問題並附來源                       |
+| 4   | RAG 品質            | 調 chunk 大小、`max_distance`、加 rerank / hybrid search；建 20 題黃金測試集 | 有「找不到就說不知道」的行為，並有量化指標         |
+| 5   | Agent 與工具        | `agent.py`、`tools.py`                                                       | 能多步驟完成「查訂單 + 查政策」                    |
+| 6   | 安全與治理          | 參數化 SQL、寫入工具核准流程、prompt injection 測試、稽核                    | 惡意文件內容無法讓 Agent 越權                      |
+| 7   | 企業整合            | 串真實系統：Slack / Teams / Zendesk / Jira / Email；SSO；佇列處理            | 一條真實流程端到端自動化                           |
+| 8   | 部署與維運          | Docker、CI、監控、成本告警、快取                                             | 有儀表板看延遲、成本、失敗率                       |
 
 ## 導入企業流程的實務清單
 
